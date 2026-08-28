@@ -254,7 +254,7 @@ async def test_generate_and_send_handles_concurrency_limit():
 
 
 @pytest.mark.asyncio
-async def test_roll_image_returns_public_artwork():
+async def test_search_random_returns_public_artwork():
     fake = FakeClient(succeeded=True)
     fake.resolve_image = AsyncMock(
         return_value=ResolverResponse(
@@ -274,9 +274,9 @@ async def test_roll_image_returns_public_artwork():
     )
     plugin = make_plugin(fake)
     event = FakeEvent()
-    event.message_str = "/roll 1girl, solo"
+    event.message_str = "/搜图 1girl, solo"
 
-    results = [r async for r in plugin.roll_image(event)]
+    results = [r async for r in plugin.resolve_by_tags(event)]
 
     chain = results[-1]
     assert chain["type"] == "chain"
@@ -286,3 +286,34 @@ async def test_roll_image_returns_public_artwork():
     assert isinstance(chain["chain"][1], Plain)
     assert "模型: some-model" in chain["chain"][1].text
     assert "页面:" in chain["chain"][1].text
+
+
+@pytest.mark.asyncio
+async def test_search_with_rank_is_deterministic():
+    fake = FakeClient(succeeded=True)
+    ranks: list[int] = []
+
+    async def resolve(tags, *, rank, size, source, model):
+        ranks.append(rank)
+        return ResolverResponse(
+            id="pub-2",
+            image_url="https://latent.moe/media/pub-2",
+            artwork_url="https://latent.moe/art/pub-2",
+            width=1024,
+            height=1024,
+            source="comfyui",
+            matched_tags=tags,
+            total_tag_count=5,
+            rank=rank,
+            view_count=7,
+        )
+
+    fake.resolve_image = AsyncMock(side_effect=resolve)  # type: ignore[method-assign]
+    plugin = make_plugin(fake)
+    event = FakeEvent()
+    event.message_str = "/搜图 1girl, solo --rank 5"
+
+    results = [r async for r in plugin.resolve_by_tags(event)]
+
+    assert ranks == [5]
+    assert results[-1]["type"] == "chain"

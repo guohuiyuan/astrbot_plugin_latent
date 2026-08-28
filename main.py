@@ -142,13 +142,13 @@ class LatentPlugin(Star):
         async for result in self._generate_and_send(event, tags, options):
             yield result
 
-    @filter.command("搜图", alias={"找图", "search", "resolve", "find"})
+    @filter.command("搜图", alias={"找图", "search", "resolve", "find", "roll", "随机", "抽图", "roll_img"})
     async def resolve_by_tags(self, event: AstrMessageEvent):
-        """通过 Danbooru 标签匹配已有的公开安全图片。"""
+        """按 Danbooru 标签随机匹配一张已公开的安全图片。"""
         event.should_call_llm(True)
         raw = strip_command(
             event.message_str,
-            {"搜图", "找图", "search", "resolve", "find"},
+            {"搜图", "找图", "search", "resolve", "find", "roll", "随机", "抽图", "roll_img"},
         )
         if not raw:
             yield event.plain_result(self._help_text())
@@ -158,59 +158,25 @@ class LatentPlugin(Star):
         if not tags:
             yield event.plain_result("请提供至少一个 Danbooru 标签，例如：/搜图 1girl, sunset")
             return
-        rank = to_int(options.get("rank"), 1, 1, 1000)
         size = resolve_enum(options.get("size"), VALID_SIZES, "preview")
         source = resolve_enum(options.get("source"), VALID_SOURCES, None)
         model = str(options.get("model", "") or "").strip() or None
+        rank = to_int(options.get("rank"), 1, 1, 1000) if options.get("rank") is not None else None
         try:
-            hit = await self.client.resolve_image(
-                tags,
-                rank=rank,
-                size=size,
-                source=source,
-                model=model,
-            )
-        except LatentAPIError as exc:
-            if exc.status_code == 404:
-                yield event.plain_result(
-                    f"没有找到匹配的公开图片。尝试减少标签或 /生图 直接生成。"
+            if rank is not None:
+                hit = await self.client.resolve_image(
+                    tags, rank=rank, size=size, source=source, model=model
                 )
-                return
-            yield event.plain_result(f"查询失败: {exc}")
-            return
-        media = await self._fetch_media(hit.id, size=size)
-        caption = self._describe_resolve(hit, tags)
-        yield event.chain_result([Image.fromBytes(media), Plain(caption)])
-
-    @filter.command("roll", alias={"随机", "抽图", "roll_img"})
-    async def roll_image(self, event: AstrMessageEvent):
-        """根据标签随机挑选一张已公开的安全图片。"""
-        event.should_call_llm(True)
-        raw = strip_command(
-            event.message_str,
-            {"roll", "随机", "抽图", "roll_img"},
-        )
-        if not raw:
-            yield event.plain_result(self._help_text())
-            return
-        prompt, options = parse_options(raw)
-        tags = normalize_tags(prompt)
-        if not tags:
-            yield event.plain_result("请提供至少一个 Danbooru 标签，例如：/roll 1girl, sunset")
-            return
-        size = resolve_enum(options.get("size"), VALID_SIZES, "preview")
-        source = resolve_enum(options.get("source"), VALID_SOURCES, None)
-        model = str(options.get("model", "") or "").strip() or None
-        try:
-            hit = await self._resolve_random(tags, size=size, source=source, model=model)
+            else:
+                hit = await self._resolve_random(tags, size=size, source=source, model=model)
         except LatentAPIError as exc:
             if exc.status_code == 404:
-                yield event.plain_result("没有找到匹配的公开图片，试试减少标签。")
+                yield event.plain_result("没有找到匹配的公开图片。尝试减少标签或 /生图 直接生成。")
                 return
             yield event.plain_result(f"查询失败: {exc}")
             return
         if hit is None:
-            yield event.plain_result("没有找到匹配的公开图片，试试减少标签。")
+            yield event.plain_result("没有找到匹配的公开图片。尝试减少标签或 /生图 直接生成。")
             return
         media = await self._fetch_media(hit.id, size=size)
         caption = self._describe_resolve(hit, tags)
@@ -454,10 +420,9 @@ class LatentPlugin(Star):
                 "    例: /生图 1girl, long hair, sunset",
                 "/画图 <自然语言描述>      由 LLM 转成标签后生图",
                 "    例: /画图 一个穿着红色连衣裙的黑发少女",
-                "/搜图 <标签>             匹配已公开的安全图片",
+                "/搜图 <标签>             随机匹配一张已公开的安全图片",
                 "    例: /搜图 1girl, night",
-                "/roll <标签>             随机挑选一张已公开的安全图片",
-                "    例: /roll 1girl, night",
+                "    （/roll /随机 /抽图 为别名）",
                 divider,
                 "可选参数:",
                 "  --steps 8-16      采样步数",
@@ -467,7 +432,7 @@ class LatentPlugin(Star):
                 "  --negative \"不想出现的内容\"",
                 "  --seed <int>",
                 "  --count <1-{max_count}>   顺序批量生成张数",
-                "  --rank <int>      搜图排名",
+                "  --rank <int>      指定排名（默认随机）",
                 "  --size thumb|preview|original",
                 "  --source novelai|sd-webui|comfyui|invokeai",
                 "  --model <模型子串>",
