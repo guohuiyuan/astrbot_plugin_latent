@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from typing import Any
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star
 
@@ -138,7 +139,6 @@ class LatentPlugin(Star):
             logger.warning("[Latent] 自然语言转标签失败: %s", exc)
             yield event.plain_result(f"标签转换失败: {exc}")
             return
-        await event.send(MessageChain([Plain(f"已将描述转换为标签: {tags}")]))
         async for result in self._generate_and_send(event, tags, options):
             yield result
 
@@ -177,6 +177,40 @@ class LatentPlugin(Star):
                 )
                 return
             yield event.plain_result(f"查询失败: {exc}")
+            return
+        media = await self._fetch_media(hit.id, size=size)
+        caption = self._describe_resolve(hit, tags)
+        yield event.chain_result([Image.fromBytes(media), Plain(caption)])
+
+    @filter.command("roll", alias={"随机", "抽图", "roll_img"})
+    async def roll_image(self, event: AstrMessageEvent):
+        """根据标签随机挑选一张已公开的安全图片。"""
+        event.should_call_llm(True)
+        raw = strip_command(
+            event.message_str,
+            {"roll", "随机", "抽图", "roll_img"},
+        )
+        if not raw:
+            yield event.plain_result(self._help_text())
+            return
+        prompt, options = parse_options(raw)
+        tags = normalize_tags(prompt)
+        if not tags:
+            yield event.plain_result("请提供至少一个 Danbooru 标签，例如：/roll 1girl, sunset")
+            return
+        size = resolve_enum(options.get("size"), VALID_SIZES, "preview")
+        source = resolve_enum(options.get("source"), VALID_SOURCES, None)
+        model = str(options.get("model", "") or "").strip() or None
+        try:
+            hit = await self._resolve_random(tags, size=size, source=source, model=model)
+        except LatentAPIError as exc:
+            if exc.status_code == 404:
+                yield event.plain_result("没有找到匹配的公开图片，试试减少标签。")
+                return
+            yield event.plain_result(f"查询失败: {exc}")
+            return
+        if hit is None:
+            yield event.plain_result("没有找到匹配的公开图片，试试减少标签。")
             return
         media = await self._fetch_media(hit.id, size=size)
         caption = self._describe_resolve(hit, tags)
@@ -257,17 +291,6 @@ class LatentPlugin(Star):
                 yield event.plain_result(message)
                 break
 
-            await event.send(
-                MessageChain(
-                    [
-                        Plain(
-                            f"已提交生图任务 {idx + 1}/{count}（{resolution} · {steps} 步），"
-                            f"队列位置 {job.queue_position or 0}，开始渲染..."
-                        )
-                    ]
-                )
-            )
-
             done = await self._poll_jobs(event, [job])
             if not done:
                 yield event.plain_result(
@@ -324,6 +347,47 @@ class LatentPlugin(Star):
             logger.warning("[Latent] 获取作品元数据 %s 失败: %s", artwork_id, exc)
             return None
 
+    async def _resolve_random(
+        self,
+        tags: list[str],
+        *,
+        size: str = "preview",
+        source: str | None = None,
+        model: str | None = None,
+    ) -> ResolverResponse | None:
+        """Resolve a random public SFW artwork that matches every tag.
+
+        The API exposes no shuffle endpoint, so this samples the deterministic
+        ``rank`` ordering from the resolver. High ranks are tried first (most
+        tags have a large public pool); if the pool is small it falls back to
+        low ranks, ending at rank 1 so a match is still returned.
+        """
+        for _ in range(6):
+            rank = random.randint(1, 1000)
+            try:
+                return await self.client.resolve_image(
+                    tags, rank=rank, size=size, source=source, model=model
+                )
+            except LatentAPIError as exc:
+                if exc.status_code != 404:
+                    raise
+        for rank in random.sample(range(2, 51), 8):
+            try:
+                return await self.client.resolve_image(
+                    tags, rank=rank, size=size, source=source, model=model
+                )
+            except LatentAPIError as exc:
+                if exc.status_code != 404:
+                    raise
+        try:
+            return await self.client.resolve_image(
+                tags, rank=1, size=size, source=source, model=model
+            )
+        except LatentAPIError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+
     # ------------------------------------------------------------------
     # Descriptions
     # ------------------------------------------------------------------
@@ -355,6 +419,8 @@ class LatentPlugin(Star):
             lines.append(f"Negative: {job.negative_prompt}")
         if meta and meta.file_size:
             lines.append(f"文件: {meta.file_size / 1024:.0f} KB · 标签 {meta.tag_count or 0} 个")
+        if meta:
+            lines.append(f"NSFW: {'是' if meta.nsfw else '否'}")
         if job.visibility:
             lines.append(f"可见性: {job.visibility}")
         if meta and meta.artwork_url:
@@ -364,14 +430,15 @@ class LatentPlugin(Star):
     @staticmethod
     def _describe_resolve(hit: ResolverResponse, tags: list[str]) -> str:
         tags_text = ", ".join(tags)
-        return "\n".join(
-            [
-                f"匹配到公开图片（{hit.width}×{hit.height}，来源 {hit.source}）",
-                f"标签: {tags_text}",
-                f"命中 {hit.total_tag_count} 个标签，第 {hit.rank} 名 · 浏览 {hit.view_count}",
-                f"页面: {hit.artwork_url}",
-            ]
-        )
+        lines = [
+            f"匹配到公开图片（{hit.width}×{hit.height}，来源 {hit.source}）",
+            f"标签: {tags_text}",
+            f"命中 {hit.total_tag_count} 个标签，第 {hit.rank} 名 · 浏览 {hit.view_count}",
+        ]
+        if hit.model:
+            lines.append(f"模型: {hit.model}")
+        lines.append(f"页面: {hit.artwork_url}")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Help
@@ -389,6 +456,8 @@ class LatentPlugin(Star):
                 "    例: /画图 一个穿着红色连衣裙的黑发少女",
                 "/搜图 <标签>             匹配已公开的安全图片",
                 "    例: /搜图 1girl, night",
+                "/roll <标签>             随机挑选一张已公开的安全图片",
+                "    例: /roll 1girl, night",
                 divider,
                 "可选参数:",
                 "  --steps 8-16      采样步数",

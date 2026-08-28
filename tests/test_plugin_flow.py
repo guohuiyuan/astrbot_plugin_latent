@@ -11,6 +11,7 @@ from data.plugins.astrbot_plugin_latent.latent.api import (
     ArtworkMeta,
     GenerationJob,
     LatentAPIError,
+    ResolverResponse,
 )
 from data.plugins.astrbot_plugin_latent.main import LatentPlugin
 
@@ -148,7 +149,7 @@ async def test_generate_and_send_success():
     assert fake.enqueued == 1
     assert fake.last_payload["prompt"] == "1girl, solo"
     assert fake.last_payload["resolution"] == "portrait"
-    assert len(event.sent) == 1  # submitted confirmation
+    assert len(event.sent) == 0  # no intermediate status messages
     chain = results[-1]
     assert chain["type"] == "chain"
     # Image-first composite: the image is the leading component, params follow.
@@ -162,6 +163,7 @@ async def test_generate_and_send_success():
     assert "Prompt: 1girl, solo" in params_text
     assert "Seed: 42" in params_text
     assert "生成器: comfyui" in params_text
+    assert "NSFW:" in params_text
 
 
 @pytest.mark.asyncio
@@ -249,3 +251,38 @@ async def test_generate_and_send_handles_concurrency_limit():
     text = "".join(r.get("text", "") for r in results if r.get("type") == "plain")
     assert fake.enqueued == 0
     assert "已有生图任务在运行" in text
+
+
+@pytest.mark.asyncio
+async def test_roll_image_returns_public_artwork():
+    fake = FakeClient(succeeded=True)
+    fake.resolve_image = AsyncMock(
+        return_value=ResolverResponse(
+            id="pub-1",
+            image_url="https://latent.moe/media/pub-1",
+            artwork_url="https://latent.moe/art/pub-1",
+            width=1024,
+            height=1024,
+            source="comfyui",
+            matched_tags=["1girl"],
+            total_tag_count=5,
+            rank=3,
+            view_count=42,
+            model="some-model",
+            nsfw=False,
+        )
+    )
+    plugin = make_plugin(fake)
+    event = FakeEvent()
+    event.message_str = "/roll 1girl, solo"
+
+    results = [r async for r in plugin.roll_image(event)]
+
+    chain = results[-1]
+    assert chain["type"] == "chain"
+    from astrbot.core.message.components import Image, Plain
+
+    assert isinstance(chain["chain"][0], Image)
+    assert isinstance(chain["chain"][1], Plain)
+    assert "模型: some-model" in chain["chain"][1].text
+    assert "页面:" in chain["chain"][1].text
