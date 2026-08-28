@@ -1,7 +1,7 @@
 name: astrbot_plugin_latent
 display_name: Latent 生图
-desc: 接入 Latent.moe 的 AI 生图插件，支持 Danbooru 标签直出与自然语言画图。
-version: v1.0.0
+desc: 接入 Latent.moe 的 AI 生图插件，支持 Danbooru 标签直出、自然语言画图与随机搜图。
+version: v1.0.1
 author: guohuiyuan
 repo: https://github.com/latent-moe/latent-api
 astrbot_version: ">=4.5.7,<5"
