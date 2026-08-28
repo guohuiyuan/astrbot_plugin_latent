@@ -1,0 +1,75 @@
+{
+  "apiKey": {
+    "description": "Latent API Key",
+    "hint": "Latent.moe 设计师 API Key，以 lat_sk_ 开头。可在 https://latent.moe/dashboard/keys 创建。",
+    "type": "string",
+    "default": "lat_sk_4CEMYrL1cmO-E0BuHjTuAE6xnPg3F4PBMPth0vEBwqk"
+  },
+  "apiBase": {
+    "description": "API Base URL",
+    "hint": "Latent API 基础地址，默认 https://latent.moe。",
+    "type": "string",
+    "default": "https://latent.moe"
+  },
+  "defaultResolution": {
+    "description": "默认分辨率",
+    "hint": "生图默认分辨率：square=1024x1024，portrait=920x1536，landscape=1536x920。",
+    "type": "string",
+    "default": "portrait",
+    "options": ["square", "portrait", "landscape"],
+    "labels": ["方形 1024x1024", "竖版 920x1536", "横版 1536x920"]
+  },
+  "defaultSteps": {
+    "description": "默认采样步数",
+    "hint": "生图默认采样步数，范围 8-16。数值越大耗时越长、细节越多。",
+    "type": "int",
+    "default": 12
+  },
+  "defaultSampler": {
+    "description": "默认采样器",
+    "hint": "生图默认采样器。",
+    "type": "string",
+    "default": "euler",
+    "options": [
+      "euler",
+      "euler_ancestral",
+      "dpmpp_2s_ancestral",
+      "dpmpp_2m",
+      "dpmpp_sde",
+      "dpmpp_2m_sde",
+      "ddim"
+    ]
+  },
+  "defaultScheduler": {
+    "description": "默认调度器",
+    "hint": "生图默认调度器。",
+    "type": "string",
+    "default": "normal",
+    "options": ["karras", "beta", "normal", "simple", "exponential"],
+    "labels": ["Karras", "Beta", "Normal", "Simple", "Exponential"]
+  },
+  "maxCount": {
+    "description": "单次最大生成张数",
+    "hint": "使用 --count 时的最大批量生成张数（按顺序逐张生成），保护周配额。",
+    "type": "int",
+    "default": 2
+  },
+  "maxPollSeconds": {
+    "description": "轮询超时",
+    "hint": "等待单个生图任务完成的最长秒数，超时后放弃并提示。",
+    "type": "int",
+    "default": 300
+  },
+  "timeout": {
+    "description": "HTTP 超时",
+    "hint": "单次 Latent API 请求超时（秒）。",
+    "type": "int",
+    "default": 30
+  },
+  "llmProviderId": {
+    "description": "标签转换 LLM Provider",
+    "hint": "自然语言转 Danbooru 标签时使用的 Provider ID。留空则使用会话当前 Provider。",
+    "type": "string",
+    "default": ""
+  }
+}
