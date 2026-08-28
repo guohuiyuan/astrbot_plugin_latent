@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from astrbot.api import logger
@@ -9,6 +10,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star
 
 from .latent.api import (
+    ArtworkMeta,
     GenerationJob,
     LatentAPIClient,
     LatentAPIError,
@@ -178,7 +180,7 @@ class LatentPlugin(Star):
             return
         media = await self._fetch_media(hit.id, size=size)
         caption = self._describe_resolve(hit, tags)
-        yield event.chain_result([Plain(caption), Image.fromBytes(media)])
+        yield event.chain_result([Image.fromBytes(media), Plain(caption)])
 
     @filter.command("latent", alias={"latent_help", "生图帮助", "画画帮助"})
     async def latent_help(self, event: AstrMessageEvent):
@@ -232,6 +234,7 @@ class LatentPlugin(Star):
         # The API allows only GENERATION_CONCURRENCY jobs in flight per key, so
         # batches are produced one image at a time rather than enqueued up front.
         for idx in range(count):
+            started = time.perf_counter()
             job_seed = seed + idx if seed is not None else None
             try:
                 job = await self.client.enqueue_generation(
@@ -276,9 +279,11 @@ class LatentPlugin(Star):
                 reason = finished.error_code or finished.status
                 yield event.plain_result(f"任务 {finished.id[:8]} 未成功: {reason}")
                 continue
+            meta = await self._get_meta(finished.artwork_id)
+            elapsed = time.perf_counter() - started
             media = await self._fetch_media(finished.artwork_id, size="preview")
-            caption = self._describe_generation(finished, prompt)
-            yield event.chain_result([Plain(caption), Image.fromBytes(media)])
+            caption = self._describe_generation(finished, prompt, elapsed, meta)
+            yield event.chain_result([Image.fromBytes(media), Plain(caption)])
 
     async def _poll_jobs(
         self,
@@ -311,19 +316,49 @@ class LatentPlugin(Star):
                 await asyncio.sleep(1.5)
         raise LatentAPIError("媒体下载失败")
 
+    async def _get_meta(self, artwork_id: str) -> ArtworkMeta | None:
+        """Best-effort lookup of generator/model metadata for an owned artwork."""
+        try:
+            return await self.client.get_artwork_meta(artwork_id)
+        except LatentAPIError as exc:
+            logger.warning("[Latent] 获取作品元数据 %s 失败: %s", artwork_id, exc)
+            return None
+
     # ------------------------------------------------------------------
     # Descriptions
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _describe_generation(job: GenerationJob, prompt: str) -> str:
+    def _describe_generation(
+        job: GenerationJob,
+        prompt: str,
+        elapsed: float | None = None,
+        meta: ArtworkMeta | None = None,
+    ) -> str:
         lines = [
-            f"已生成图片（{job.width}×{job.height}）",
+            "已生成图片（"
+            + f"{job.width}×{job.height}"
+            + (f"，耗时 {elapsed:.1f}s）" if elapsed is not None else "）"),
             f"Prompt: {prompt}",
-            f"Seed: {job.seed} · Sampler: {job.sampler} · Scheduler: {job.scheduler}",
+            f"Seed: {job.seed} · 步数 {job.steps} · {job.resolution or 'portrait'}",
+            f"采样器: {job.sampler} · 调度器: {job.scheduler}",
         ]
+        if meta:
+            detail = []
+            if meta.generator:
+                detail.append(f"生成器: {meta.generator}")
+            if meta.model:
+                detail.append(f"模型: {meta.model}")
+            if detail:
+                lines.append(" · ".join(detail))
+        if job.negative_prompt:
+            lines.append(f"Negative: {job.negative_prompt}")
+        if meta and meta.file_size:
+            lines.append(f"文件: {meta.file_size / 1024:.0f} KB · 标签 {meta.tag_count or 0} 个")
         if job.visibility:
             lines.append(f"可见性: {job.visibility}")
+        if meta and meta.artwork_url:
+            lines.append(f"页面: {meta.artwork_url}")
         return "\n".join(lines)
 
     @staticmethod

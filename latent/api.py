@@ -104,6 +104,35 @@ class GenerationJob:
         return self.status in {"succeeded", "failed", "cancelled"}
 
 
+@dataclass
+class ArtworkMeta:
+    """Additional metadata for an owned artwork, used to enrich generation results."""
+
+    id: str
+    generator: str | None = None
+    model: str | None = None
+    mime: str | None = None
+    file_size: int | None = None
+    tag_count: int | None = None
+    nsfw: bool = False
+    moderation_status: str | None = None
+    artwork_url: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ArtworkMeta":
+        return cls(
+            id=str(data["id"]),
+            generator=data.get("generator"),
+            model=data.get("model"),
+            mime=data.get("mime"),
+            file_size=data.get("fileSize"),
+            tag_count=data.get("tagCount"),
+            nsfw=bool(data.get("nsfw", False)),
+            moderation_status=data.get("moderationStatus"),
+            artwork_url=data.get("artworkUrl"),
+        )
+
+
 class LatentAPIClient:
     """Async client for the Latent.moe API.
 
@@ -228,6 +257,30 @@ class LatentAPIClient:
         self._raise_for_error(response)
         payload = response.json()
         return bool(payload.get("ok", False))
+
+    async def get_artwork_meta(self, artwork_id: str) -> ArtworkMeta | None:
+        """Look up an owned artwork's generator/model metadata by id.
+
+        The API exposes owned artwork listing rather than a single-artwork GET,
+        so this pages through the caller's newest artworks and returns the first
+        match. Returns ``None`` when the artwork cannot be found.
+        """
+        cursor: str | None = None
+        for _ in range(10):
+            params: dict[str, Any] = {"mine": "1", "limit": "100"}
+            if cursor:
+                params["cursor"] = cursor
+            response = await self._client.get("/api/v1/artworks", params=params)
+            self._raise_for_error(response)
+            payload = response.json()
+            items = payload.get("data") or []
+            for item in items:
+                if str(item.get("id")) == artwork_id:
+                    return ArtworkMeta.from_dict(item)
+            cursor = payload.get("nextCursor")
+            if not cursor:
+                break
+        return None
 
     async def fetch_media(self, artwork_id: str, size: str | None = None) -> bytes:
         """Download the bytes of an owned or public artwork.

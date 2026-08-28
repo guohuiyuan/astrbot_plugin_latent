@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from data.plugins.astrbot_plugin_latent.latent.api import GenerationJob, LatentAPIError
+from data.plugins.astrbot_plugin_latent.latent.api import (
+    ArtworkMeta,
+    GenerationJob,
+    LatentAPIError,
+)
 from data.plugins.astrbot_plugin_latent.main import LatentPlugin
 
 
@@ -54,6 +58,16 @@ class FakeClient:
 
     async def fetch_media(self, artwork_id: str, size: str) -> bytes:
         return b"png-bytes"
+
+    async def get_artwork_meta(self, artwork_id: str) -> ArtworkMeta:
+        return ArtworkMeta(
+            id=artwork_id,
+            generator="comfyui",
+            model=None,
+            file_size=123456,
+            tag_count=5,
+            artwork_url=f"https://latent.moe/art/{artwork_id}",
+        )
 
     async def aclose(self) -> None:
         return None
@@ -137,7 +151,17 @@ async def test_generate_and_send_success():
     assert len(event.sent) == 1  # submitted confirmation
     chain = results[-1]
     assert chain["type"] == "chain"
-    assert any(getattr(comp, "file", "").startswith("base64://") for comp in chain["chain"])
+    # Image-first composite: the image is the leading component, params follow.
+    from astrbot.core.message.components import Image, Plain
+
+    assert isinstance(chain["chain"][0], Image)
+    assert getattr(chain["chain"][0], "file", "").startswith("base64://")
+    assert isinstance(chain["chain"][1], Plain)
+    params_text = chain["chain"][1].text
+    assert "耗时" in params_text
+    assert "Prompt: 1girl, solo" in params_text
+    assert "Seed: 42" in params_text
+    assert "生成器: comfyui" in params_text
 
 
 @pytest.mark.asyncio
@@ -201,6 +225,9 @@ async def test_generate_and_send_batch_is_sequential():
     chains = [r for r in results if r.get("type") == "chain"]
     assert len(chains) == 2
     assert fake.last_payload["seed"] == 101  # seed increments across the batch
+    from astrbot.core.message.components import Image
+
+    assert all(isinstance(c["chain"][0], Image) for c in chains)
 
 
 @pytest.mark.asyncio
