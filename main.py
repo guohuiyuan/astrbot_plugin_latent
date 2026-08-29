@@ -98,6 +98,14 @@ class LatentPlugin(Star):
             message_id = getattr(event, "message_id", None)
             bot = getattr(event, "bot", None)
             if message_id is not None and bot is not None and hasattr(bot, "call_action"):
+                # NapCat 的 set_msg_emoji_like 要求 message_id 为 number，
+                # 而 AstrBot 的 aiocqhttp 适配层会把它转成字符串，这里显式还原。
+                try:
+                    message_id = int(message_id)
+                except (TypeError, ValueError):
+                    message_id = None
+                if message_id is None:
+                    raise ValueError("message_id 无法转换为 int")
                 await bot.call_action(
                     "set_msg_emoji_like",
                     message_id=message_id,
@@ -440,30 +448,53 @@ class LatentPlugin(Star):
         elapsed: float | None = None,
         meta: ArtworkMeta | None = None,
     ) -> str:
-        lines = [
-            "已生成图片（"
-            + f"{job.width}×{job.height}"
-            + (f"，耗时 {elapsed:.1f}s）" if elapsed is not None else "）"),
-            f"Prompt: {prompt}",
-            f"Seed: {job.seed} · 步数 {job.steps} · {job.resolution or 'portrait'}",
-            f"采样器: {job.sampler} · 调度器: {job.scheduler}",
-        ]
+        lines = ["【生图结果】"]
+
+        header = [f"尺寸: {job.width} × {job.height}"]
+        if elapsed is not None:
+            header.append(f"耗时: {elapsed:.1f}s")
+        lines.append(" | ".join(header))
+
         if meta:
-            detail = []
-            if meta.generator:
-                detail.append(f"生成器: {meta.generator}")
             if meta.model:
-                detail.append(f"模型: {meta.model}")
-            if detail:
-                lines.append(" · ".join(detail))
+                lines.append(f"模型: {meta.model}")
+            if meta.generator:
+                lines.append(f"生成器: {meta.generator}")
+
+        sampler_parts = []
+        if job.sampler:
+            sampler_parts.append(f"采样器: {job.sampler}")
+        if job.scheduler:
+            sampler_parts.append(f"调度器: {job.scheduler}")
+        if job.resolution:
+            sampler_parts.append(f"方向: {job.resolution}")
+        if sampler_parts:
+            lines.append(" | ".join(sampler_parts))
+
+        steps_seed = []
+        if job.steps:
+            steps_seed.append(f"步数: {job.steps}")
+        if job.seed is not None:
+            steps_seed.append(f"Seed: {job.seed}")
+        if steps_seed:
+            lines.append(" | ".join(steps_seed))
+
+        lines.append(f"Prompt: {prompt}")
         if job.negative_prompt:
             lines.append(f"Negative: {job.negative_prompt}")
-        if meta and meta.file_size:
-            lines.append(f"文件: {meta.file_size / 1024:.0f} KB · 标签 {meta.tag_count or 0} 个")
+
+        footer = []
         if meta:
-            lines.append(f"NSFW: {'是' if meta.nsfw else '否'}")
+            footer.append(f"NSFW: {'是' if meta.nsfw else '否'}")
+            if meta.file_size:
+                footer.append(f"文件: {meta.file_size / 1024:.0f} KB")
+            if meta.tag_count is not None:
+                footer.append(f"标签: {meta.tag_count} 个")
         if job.visibility:
-            lines.append(f"可见性: {job.visibility}")
+            footer.append(f"可见性: {job.visibility}")
+        if footer:
+            lines.append(" | ".join(footer))
+
         if meta and meta.artwork_url:
             lines.append(f"页面: {meta.artwork_url}")
         return "\n".join(lines)
@@ -471,13 +502,15 @@ class LatentPlugin(Star):
     @staticmethod
     def _describe_resolve(hit: ResolverResponse, tags: list[str]) -> str:
         tags_text = ", ".join(tags)
-        lines = [
-            f"匹配到公开图片（{hit.width}×{hit.height}，来源 {hit.source}）",
-            f"标签: {tags_text}",
-            f"命中 {hit.total_tag_count} 个标签，第 {hit.rank} 名 · 浏览 {hit.view_count}",
-        ]
+        lines = ["【搜图结果】"]
+        lines.append(f"尺寸: {hit.width} × {hit.height} | 来源: {hit.source}")
+        lines.append(f"标签: {tags_text}")
+        lines.append(
+            f"命中: {hit.total_tag_count} 个标签 | 排名: 第 {hit.rank} 名 | 浏览: {hit.view_count}"
+        )
         if hit.model:
             lines.append(f"模型: {hit.model}")
+        lines.append(f"NSFW: {'是' if hit.nsfw else '否'}")
         lines.append(f"页面: {hit.artwork_url}")
         return "\n".join(lines)
 

@@ -337,7 +337,7 @@ async def test_search_random_returns_public_artwork():
     results = [r async for r in plugin.resolve_by_tags(event)]
 
     assert event.bot.call_action.await_args.args[0] == "set_msg_emoji_like"
-    assert event.bot.call_action.await_args.kwargs["message_id"] == "123"
+    assert event.bot.call_action.await_args.kwargs["message_id"] == 123
     assert event.bot.call_action.await_args.kwargs["emoji_id"] == "76"
     chain = results[-1]
     assert chain["type"] == "chain"
@@ -426,6 +426,35 @@ async def test_every_command_reacts_to_original_message(command_method, message)
         _ = [r async for r in getattr(plugin, command_method)(event)]
 
     assert event.bot.call_action.await_args.args[0] == "set_msg_emoji_like"
-    assert event.bot.call_action.await_args.kwargs["message_id"] == "123"
+    assert event.bot.call_action.await_args.kwargs["message_id"] == 123
     assert event.bot.call_action.await_args.kwargs["emoji_id"] == "76"
     assert event.reacted is None  # NapCat 路径优先，不触发 fallback
+
+
+@pytest.mark.asyncio
+async def test_react_falls_back_when_call_action_fails():
+    fake = FakeClient(succeeded=True)
+    plugin = make_plugin(fake)
+    event = FakeEvent()
+    event.bot.call_action = AsyncMock(
+        side_effect=RuntimeError("no such action")
+    )
+
+    await plugin._react_to_message(event)
+
+    assert event.bot.call_action.await_args.args[0] == "set_msg_emoji_like"
+    assert event.bot.call_action.await_args.kwargs["message_id"] == 123
+    assert event.reacted == "👍"
+
+
+@pytest.mark.asyncio
+async def test_react_converts_string_message_id_to_int():
+    fake = FakeClient(succeeded=True)
+    plugin = make_plugin(fake)
+    event = FakeEvent()
+    event.message_id = "987654"
+
+    await plugin._react_to_message(event)
+
+    assert event.bot.call_action.await_args.kwargs["message_id"] == 987654
+    assert event.reacted is None
