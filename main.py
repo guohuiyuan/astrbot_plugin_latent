@@ -18,6 +18,7 @@ from .latent.api import (
     ResolverResponse,
     normalize_tags,
 )
+from .latent.metadata import parse_png_metadata
 from .latent.utils import (
     VALID_RESOLUTIONS,
     VALID_SAMPLERS,
@@ -110,6 +111,7 @@ class LatentPlugin(Star):
                     "set_msg_emoji_like",
                     message_id=message_id,
                     emoji_id="76",
+                    self_id=getattr(event, "get_self_id", lambda: None)(),
                 )
                 return
         except Exception as exc:
@@ -209,7 +211,8 @@ class LatentPlugin(Star):
             yield event.plain_result("没有找到匹配的公开图片。尝试减少标签或 /生图 直接生成。")
             return
         media = await self._fetch_media(hit.id, size=size)
-        caption = self._describe_resolve(hit, tags)
+        embedded = parse_png_metadata(media)
+        caption = self._describe_resolve(hit, tags, embedded)
         yield event.chain_result([Image.fromBytes(media), Plain(caption)])
 
     @filter.command("latent", alias={"latent_help", "生图帮助", "画画帮助"})
@@ -353,8 +356,11 @@ class LatentPlugin(Star):
                 continue
             meta = await self._get_meta(finished.artwork_id)
             elapsed = time.perf_counter() - started
-            media = await self._fetch_media(finished.artwork_id, size="preview")
-            caption = self._describe_generation(finished, prompt, elapsed, meta)
+            # Fetch the original PNG so the embedded ComfyUI workflow is
+            # available; the preview WebP strips that metadata.
+            media = await self._fetch_media(finished.artwork_id)
+            embedded = parse_png_metadata(media)
+            caption = self._describe_generation(finished, prompt, elapsed, meta, embedded)
             yield event.chain_result([Image.fromBytes(media), Plain(caption)])
 
     async def _poll_jobs(
@@ -378,7 +384,7 @@ class LatentPlugin(Star):
         results = await asyncio.gather(*(poll_one(job) for job in jobs))
         return [job for job in results if job.is_terminal()]
 
-    async def _fetch_media(self, artwork_id: str, size: str) -> bytes:
+    async def _fetch_media(self, artwork_id: str, size: str | None = None) -> bytes:
         for attempt in range(3):
             try:
                 return await self.client.fetch_media(artwork_id, size=size)
@@ -447,7 +453,9 @@ class LatentPlugin(Star):
         prompt: str,
         elapsed: float | None = None,
         meta: ArtworkMeta | None = None,
+        embedded: dict[str, Any] | None = None,
     ) -> str:
+        embedded = embedded or {}
         lines = ["【生图结果】"]
 
         header = [f"尺寸: {job.width} × {job.height}"]
@@ -455,11 +463,14 @@ class LatentPlugin(Star):
             header.append(f"耗时: {elapsed:.1f}s")
         lines.append(" | ".join(header))
 
-        if meta:
-            if meta.model:
-                lines.append(f"模型: {meta.model}")
-            if meta.generator:
-                lines.append(f"生成器: {meta.generator}")
+        model = embedded.get("model") or (meta.model if meta else None)
+        generator = meta.generator if meta else None
+        if model and generator:
+            lines.append(f"模型: {model} | 生成器: {generator}")
+        elif model:
+            lines.append(f"模型: {model}")
+        elif generator:
+            lines.append(f"生成器: {generator}")
 
         sampler_parts = []
         if job.sampler:
@@ -471,6 +482,14 @@ class LatentPlugin(Star):
         if sampler_parts:
             lines.append(" | ".join(sampler_parts))
 
+        tuning_parts = []
+        if embedded.get("cfg") is not None:
+            tuning_parts.append(f"CFG比例: {embedded['cfg']}")
+        if embedded.get("strength") is not None:
+            tuning_parts.append(f"强度: {embedded['strength']}")
+        if tuning_parts:
+            lines.append(" | ".join(tuning_parts))
+
         steps_seed = []
         if job.steps:
             steps_seed.append(f"步数: {job.steps}")
@@ -479,7 +498,7 @@ class LatentPlugin(Star):
         if steps_seed:
             lines.append(" | ".join(steps_seed))
 
-        lines.append(f"Prompt: {prompt}")
+        lines.append(f"标签: {prompt}")
         if job.negative_prompt:
             lines.append(f"Negative: {job.negative_prompt}")
 
@@ -489,7 +508,7 @@ class LatentPlugin(Star):
             if meta.file_size:
                 footer.append(f"文件: {meta.file_size / 1024:.0f} KB")
             if meta.tag_count is not None:
-                footer.append(f"标签: {meta.tag_count} 个")
+                footer.append(f"标签数: {meta.tag_count}")
         if job.visibility:
             footer.append(f"可见性: {job.visibility}")
         if footer:
@@ -500,7 +519,12 @@ class LatentPlugin(Star):
         return "\n".join(lines)
 
     @staticmethod
-    def _describe_resolve(hit: ResolverResponse, tags: list[str]) -> str:
+    def _describe_resolve(
+        hit: ResolverResponse,
+        tags: list[str],
+        embedded: dict[str, Any] | None = None,
+    ) -> str:
+        embedded = embedded or {}
         tags_text = ", ".join(tags)
         lines = ["【搜图结果】"]
         lines.append(f"尺寸: {hit.width} × {hit.height} | 来源: {hit.source}")
@@ -508,8 +532,16 @@ class LatentPlugin(Star):
         lines.append(
             f"命中: {hit.total_tag_count} 个标签 | 排名: 第 {hit.rank} 名 | 浏览: {hit.view_count}"
         )
-        if hit.model:
-            lines.append(f"模型: {hit.model}")
+        model = embedded.get("model") or hit.model
+        if model:
+            lines.append(f"模型: {model}")
+        tuning_parts = []
+        if embedded.get("cfg") is not None:
+            tuning_parts.append(f"CFG比例: {embedded['cfg']}")
+        if embedded.get("strength") is not None:
+            tuning_parts.append(f"强度: {embedded['strength']}")
+        if tuning_parts:
+            lines.append(" | ".join(tuning_parts))
         lines.append(f"NSFW: {'是' if hit.nsfw else '否'}")
         lines.append(f"页面: {hit.artwork_url}")
         return "\n".join(lines)

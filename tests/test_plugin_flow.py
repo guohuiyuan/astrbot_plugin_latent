@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import struct
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,6 +15,7 @@ from data.plugins.astrbot_plugin_latent.latent.api import (
     LatentAPIError,
     ResolverResponse,
 )
+from data.plugins.astrbot_plugin_latent.latent.metadata import parse_png_metadata
 from data.plugins.astrbot_plugin_latent.main import LatentPlugin
 
 
@@ -117,9 +120,13 @@ class FakeEvent:
         self.llm_disabled = False
         self.message_str = "/生图 1girl, solo"
         self.message_id = "123"
+        self._self_id = "123456"
         self.reacted: str | None = None
         self.unified_msg_origin = "origin"
         self.bot = SimpleNamespace(call_action=AsyncMock(return_value=None))
+
+    def get_self_id(self) -> str:
+        return self._self_id
 
     def should_call_llm(self, value: bool) -> None:
         self.llm_disabled = value
@@ -167,7 +174,7 @@ async def test_generate_and_send_success():
     assert isinstance(chain["chain"][1], Plain)
     params_text = chain["chain"][1].text
     assert "耗时" in params_text
-    assert "Prompt: 1girl, solo" in params_text
+    assert "标签: 1girl, solo" in params_text
     assert "Seed: 42" in params_text
     assert "生成器: comfyui" in params_text
     assert "NSFW:" in params_text
@@ -339,6 +346,7 @@ async def test_search_random_returns_public_artwork():
     assert event.bot.call_action.await_args.args[0] == "set_msg_emoji_like"
     assert event.bot.call_action.await_args.kwargs["message_id"] == 123
     assert event.bot.call_action.await_args.kwargs["emoji_id"] == "76"
+    assert event.bot.call_action.await_args.kwargs["self_id"] == "123456"
     chain = results[-1]
     assert chain["type"] == "chain"
     from astrbot.core.message.components import Image, Plain
@@ -428,6 +436,7 @@ async def test_every_command_reacts_to_original_message(command_method, message)
     assert event.bot.call_action.await_args.args[0] == "set_msg_emoji_like"
     assert event.bot.call_action.await_args.kwargs["message_id"] == 123
     assert event.bot.call_action.await_args.kwargs["emoji_id"] == "76"
+    assert event.bot.call_action.await_args.kwargs["self_id"] == "123456"
     assert event.reacted is None  # NapCat 路径优先，不触发 fallback
 
 
@@ -444,6 +453,7 @@ async def test_react_falls_back_when_call_action_fails():
 
     assert event.bot.call_action.await_args.args[0] == "set_msg_emoji_like"
     assert event.bot.call_action.await_args.kwargs["message_id"] == 123
+    assert event.bot.call_action.await_args.kwargs["self_id"] == "123456"
     assert event.reacted == "👍"
 
 
@@ -457,4 +467,91 @@ async def test_react_converts_string_message_id_to_int():
     await plugin._react_to_message(event)
 
     assert event.bot.call_action.await_args.kwargs["message_id"] == 987654
+    assert event.bot.call_action.await_args.kwargs["self_id"] == "123456"
     assert event.reacted is None
+
+
+def _make_png_with_prompt(workflow: dict[str, Any]) -> bytes:
+    """Build a minimal PNG carrying a ComfyUI ``prompt`` tEXt chunk."""
+
+    def chunk(ctype: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + ctype + data + struct.pack(">I", 0)
+
+    payload = json.dumps(workflow).encode("utf-8")
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"tEXt", b"prompt\x00" + payload)
+        + chunk(b"IEND", b"")
+    )
+
+
+def test_parse_png_metadata_extracts_comfyui_params():
+    workflow = {
+        "1": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": "models/miaomiaoHarem_anima8Step10.safetensors"},
+        },
+        "8": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": 123,
+                "steps": 12,
+                "cfg": 1.0,
+                "sampler_name": "euler",
+                "scheduler": "normal",
+                "denoise": 1.0,
+            },
+        },
+    }
+
+    info = parse_png_metadata(_make_png_with_prompt(workflow))
+
+    assert info["model"] == "miaomiaoHarem_anima8Step10"
+    assert info["cfg"] == 1.0
+    assert info["strength"] == 1.0
+    assert info["sampler"] == "euler"
+    assert info["scheduler"] == "normal"
+    assert info["steps"] == 12
+    assert info["seed"] == 123
+
+
+def test_parse_png_metadata_ignores_webp_preview():
+    assert parse_png_metadata(b"RIFF\x00\x00\x00\x00WEBP") == {}
+    assert parse_png_metadata(b"") == {}
+
+
+def test_describe_generation_includes_embedded_model_cfg_strength():
+    job = GenerationJob(
+        id="job-1",
+        status="succeeded",
+        prompt="1girl, solo",
+        seed=42,
+        width=920,
+        height=1536,
+        steps=12,
+        created_at="2026-01-01T00:00:00Z",
+        artwork_id="art-1",
+        sampler="euler",
+        scheduler="normal",
+        visibility="private",
+    )
+    meta = ArtworkMeta(
+        id="art-1",
+        generator="comfyui",
+        file_size=1752080,
+        tag_count=23,
+        artwork_url="https://latent.moe/art/art-1",
+    )
+    text = LatentPlugin._describe_generation(
+        job,
+        "1girl, solo",
+        8.9,
+        meta,
+        {"model": "miaomiaoHarem_anima8Step10", "cfg": 1.0, "strength": 1.0},
+    )
+
+    assert "模型: miaomiaoHarem_anima8Step10" in text
+    assert "CFG比例: 1.0" in text
+    assert "强度: 1.0" in text
+    assert "耗时: 8.9s" in text
+    assert "生成器: comfyui" in text
