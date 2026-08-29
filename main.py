@@ -92,6 +92,25 @@ class LatentPlugin(Star):
     async def terminate(self):
         await self.client.aclose()
 
+    async def _react_to_message(self, event: AstrMessageEvent) -> None:
+        """在原消息上贴一个表情，作为插件已收到命令的即时反馈。"""
+        try:
+            message_id = getattr(event, "message_id", None)
+            bot = getattr(event, "bot", None)
+            if message_id is not None and bot is not None and hasattr(bot, "call_action"):
+                await bot.call_action(
+                    "set_msg_emoji_like",
+                    message_id=message_id,
+                    emoji_id="76",
+                )
+                return
+        except Exception as exc:
+            logger.warning("[Latent] 贴表情失败: %s", exc)
+        try:
+            await event.react("👍")
+        except Exception as exc:
+            logger.warning("[Latent] 默认表情回应失败: %s", exc)
+
     # ------------------------------------------------------------------
     # Commands
     # ------------------------------------------------------------------
@@ -100,6 +119,7 @@ class LatentPlugin(Star):
     async def generate_by_tags(self, event: AstrMessageEvent):
         """通过 Danbooru 标签直接生图。"""
         event.should_call_llm(True)
+        await self._react_to_message(event)
         raw = strip_command(
             event.message_str,
             {"生图", "生成", "draw", "generate", "tag2img"},
@@ -119,6 +139,7 @@ class LatentPlugin(Star):
     async def generate_by_nl(self, event: AstrMessageEvent):
         """自然语言描述经由 LLM 转成 Danbooru 标签后生图。"""
         event.should_call_llm(True)
+        await self._react_to_message(event)
         raw = strip_command(
             event.message_str,
             {"画图", "绘画", "nl", "draw_nl"},
@@ -146,6 +167,7 @@ class LatentPlugin(Star):
     async def resolve_by_tags(self, event: AstrMessageEvent):
         """按 Danbooru 标签随机匹配一张已公开的安全图片。"""
         event.should_call_llm(True)
+        await self._react_to_message(event)
         raw = strip_command(
             event.message_str,
             {"搜图", "找图", "search", "resolve", "find", "roll", "随机", "抽图", "roll_img"},
@@ -185,27 +207,80 @@ class LatentPlugin(Star):
     @filter.command("latent", alias={"latent_help", "生图帮助", "画画帮助"})
     async def latent_help(self, event: AstrMessageEvent):
         event.should_call_llm(True)
+        await self._react_to_message(event)
         yield event.plain_result(self._help_text())
 
     # ------------------------------------------------------------------
     # Natural language -> Danbooru tags
     # ------------------------------------------------------------------
 
-    async def _to_danbooru_tags(self, event: AstrMessageEvent, description: str) -> str:
-        provider_id = self.llm_provider_id or await self.context.get_current_chat_provider_id(
-            event.unified_msg_origin
-        )
-        if not provider_id:
+    async def _to_danbooru_tags(self, event: AstrMessageEvent, description: str) -> list[str]:
+        preferred_id = self.llm_provider_id
+        if not preferred_id:
+            try:
+                preferred_id = await self.context.get_current_chat_provider_id(
+                    event.unified_msg_origin
+                )
+            except Exception as exc:
+                logger.warning("[Latent] 获取会话当前 LLM Provider 失败: %s", exc)
+                preferred_id = None
+
+        candidate_ids = self._llm_candidate_ids(event, preferred_id)
+        if not candidate_ids:
             raise LatentAPIError("未配置可用的 LLM Provider，无法进行自然语言标签转换")
-        resp = await self.context.llm_generate(
-            chat_provider_id=provider_id,
-            prompt=description,
-            system_prompt=TAG_SYSTEM_PROMPT,
-            temperature=0.4,
-            max_tokens=600,
-        )
-        raw_text = resp.completion_text or ""
-        return extract_tag_text(raw_text)
+
+        last_exc: Exception | None = None
+        for provider_id in candidate_ids:
+            try:
+                resp = await self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=description,
+                    system_prompt=TAG_SYSTEM_PROMPT,
+                    temperature=0.4,
+                    max_tokens=600,
+                )
+                raw_text = resp.completion_text or ""
+                tags = extract_tag_text(raw_text)
+                if tags:
+                    return tags
+                raise LatentAPIError("模型返回了空标签")
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("[Latent] LLM Provider %s 标签转换失败: %s", provider_id, exc)
+
+        raise LatentAPIError(
+            f"所有可用的 LLM Provider 均无法完成标签转换，最后一个错误: {last_exc}"
+        ) from last_exc
+
+    def _llm_candidate_ids(
+        self, event: AstrMessageEvent, preferred_id: str | None
+    ) -> list[str]:
+        """Build the ordered LLM provider IDs to try for tag conversion."""
+        ids: list[str] = []
+        seen: set[str] = set()
+
+        def add(provider_id: Any) -> None:
+            pid = str(provider_id or "").strip()
+            if pid and pid not in seen:
+                seen.add(pid)
+                ids.append(pid)
+
+        add(preferred_id)
+        try:
+            config = self.context.get_config(event.unified_msg_origin)
+            settings = config.get("provider_settings", {}) if hasattr(config, "get") else {}
+            fallbacks = settings.get("fallback_chat_models", [])
+            if isinstance(fallbacks, list):
+                for fallback_id in fallbacks:
+                    add(fallback_id)
+        except Exception as exc:
+            logger.debug("[Latent] 读取 fallback_chat_models 失败: %s", exc)
+        try:
+            for provider in self.context.get_all_providers():
+                add(getattr(provider, "provider_config", {}).get("id", ""))
+        except Exception as exc:
+            logger.debug("[Latent] 枚举可用 LLM Provider 失败: %s", exc)
+        return ids
 
     # ------------------------------------------------------------------
     # Generation flow

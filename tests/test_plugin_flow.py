@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -116,9 +116,16 @@ class FakeEvent:
         self.sent: list[Any] = []
         self.llm_disabled = False
         self.message_str = "/生图 1girl, solo"
+        self.message_id = "123"
+        self.reacted: str | None = None
+        self.unified_msg_origin = "origin"
+        self.bot = SimpleNamespace(call_action=AsyncMock(return_value=None))
 
     def should_call_llm(self, value: bool) -> None:
         self.llm_disabled = value
+
+    async def react(self, emoji: str) -> None:
+        self.reacted = emoji
 
     async def send(self, chain: Any) -> None:
         self.sent.append(chain)
@@ -194,6 +201,10 @@ async def test_generate_and_send_no_workers():
 async def test_to_danbooru_tags_uses_llm():
     context = AsyncMock()
     context.get_current_chat_provider_id = AsyncMock(return_value="91/glm-5.2")
+    context.get_config = MagicMock(
+        return_value={"provider_settings": {"fallback_chat_models": []}}
+    )
+    context.get_all_providers = MagicMock(return_value=[])
     context.llm_generate = AsyncMock(
         return_value=SimpleNamespace(completion_text="masterpiece, best quality, 1girl, long hair")
     )
@@ -207,6 +218,53 @@ async def test_to_danbooru_tags_uses_llm():
     assert args["chat_provider_id"] == "91/glm-5.2"
     assert args["prompt"] == "一个黑发少女"
     assert "Danbooru" in args["system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_to_danbooru_tags_falls_back_to_next_provider():
+    context = AsyncMock()
+    context.get_current_chat_provider_id = AsyncMock(return_value="91/glm-5.2")
+    context.get_config = MagicMock(
+        return_value={
+            "provider_settings": {
+                "fallback_chat_models": ["91/grok-4.6", "91/hy3"],
+            }
+        }
+    )
+    context.get_all_providers = MagicMock(return_value=[])
+
+    calls: list[str] = []
+
+    async def llm_mock(*, chat_provider_id: str, **kwargs: Any) -> SimpleNamespace:
+        calls.append(chat_provider_id)
+        if chat_provider_id == "91/glm-5.2":
+            raise RuntimeError("upstream_error 402")
+        return SimpleNamespace(completion_text="masterpiece, best quality, 1girl, long hair")
+
+    context.llm_generate = AsyncMock(side_effect=llm_mock)
+    plugin = LatentPlugin(context, {"apiKey": "lat_sk_test"})
+    event = SimpleNamespace(unified_msg_origin="origin")
+
+    tags = await plugin._to_danbooru_tags(event, "一个黑发少女")  # type: ignore[arg-type]
+
+    assert tags == ["masterpiece", "best_quality", "1girl", "long_hair"]
+    assert calls == ["91/glm-5.2", "91/grok-4.6"]
+
+
+@pytest.mark.asyncio
+async def test_to_danbooru_tags_reports_when_all_providers_fail():
+    context = AsyncMock()
+    context.get_current_chat_provider_id = AsyncMock(return_value="91/glm-5.2")
+    context.get_config = MagicMock(
+        return_value={"provider_settings": {"fallback_chat_models": ["91/grok-4.6"]}}
+    )
+    context.get_all_providers = MagicMock(return_value=[])
+    context.llm_generate = AsyncMock(side_effect=RuntimeError("upstream_error 402"))
+    plugin = LatentPlugin(context, {"apiKey": "lat_sk_test"})
+    event = SimpleNamespace(unified_msg_origin="origin")
+
+    with pytest.raises(LatentAPIError):
+        await plugin._to_danbooru_tags(event, "一个黑发少女")  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -278,6 +336,9 @@ async def test_search_random_returns_public_artwork():
 
     results = [r async for r in plugin.resolve_by_tags(event)]
 
+    assert event.bot.call_action.await_args.args[0] == "set_msg_emoji_like"
+    assert event.bot.call_action.await_args.kwargs["message_id"] == "123"
+    assert event.bot.call_action.await_args.kwargs["emoji_id"] == "76"
     chain = results[-1]
     assert chain["type"] == "chain"
     from astrbot.core.message.components import Image, Plain
@@ -315,5 +376,56 @@ async def test_search_with_rank_is_deterministic():
 
     results = [r async for r in plugin.resolve_by_tags(event)]
 
+    assert event.bot.call_action.await_args.args[0] == "set_msg_emoji_like"
     assert ranks == [5]
     assert results[-1]["type"] == "chain"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command_method, message",
+    [
+        ("generate_by_tags", "/生图 1girl, solo"),
+        ("generate_by_nl", "/画图 一个黑发少女"),
+        ("resolve_by_tags", "/搜图 1girl, solo"),
+        ("latent_help", "/latent"),
+    ],
+)
+async def test_every_command_reacts_to_original_message(command_method, message):
+    fake = FakeClient(succeeded=True)
+    fake.resolve_image = AsyncMock(
+        return_value=ResolverResponse(
+            id="pub-reaction",
+            image_url="https://latent.moe/media/pub-reaction",
+            artwork_url="https://latent.moe/art/pub-reaction",
+            width=1024,
+            height=1024,
+            source="comfyui",
+            matched_tags=["1girl"],
+            total_tag_count=3,
+            rank=1,
+            view_count=1,
+            nsfw=False,
+        )
+    )
+    context = AsyncMock()
+    context.get_current_chat_provider_id = AsyncMock(return_value="91/glm-5.2")
+    context.get_config = MagicMock(
+        return_value={"provider_settings": {"fallback_chat_models": []}}
+    )
+    context.get_all_providers = MagicMock(return_value=[])
+    context.llm_generate = AsyncMock(
+        return_value=SimpleNamespace(completion_text="masterpiece, 1girl, solo")
+    )
+    plugin = make_plugin(fake)
+    plugin.context = context
+    event = FakeEvent()
+    event.message_str = message
+
+    with patch("asyncio.sleep", new=AsyncMock()):
+        _ = [r async for r in getattr(plugin, command_method)(event)]
+
+    assert event.bot.call_action.await_args.args[0] == "set_msg_emoji_like"
+    assert event.bot.call_action.await_args.kwargs["message_id"] == "123"
+    assert event.bot.call_action.await_args.kwargs["emoji_id"] == "76"
+    assert event.reacted is None  # NapCat 路径优先，不触发 fallback
