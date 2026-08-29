@@ -75,6 +75,7 @@ def parse_png_metadata(data: bytes) -> dict[str, Any]:
 
 
 def _merge_comfyui_params(workflow: dict[str, Any], info: dict[str, Any]) -> None:
+    sampler_inputs: dict[str, Any] | None = None
     for node in workflow.values():
         if not isinstance(node, dict):
             continue
@@ -90,12 +91,49 @@ def _merge_comfyui_params(workflow: dict[str, Any], info: dict[str, Any]) -> Non
                     base = base[: -len(".safetensors")]
                 info.setdefault("model", base)
         elif class_type == "KSampler":
+            sampler_inputs = inputs
             for key in ("cfg", "steps", "sampler_name", "scheduler", "seed", "denoise"):
                 if inputs.get(key) is not None:
                     info.setdefault(key, inputs[key])
+
+    if sampler_inputs:
+        positive = _resolve_clip_text(workflow, sampler_inputs.get("positive"))
+        negative = _resolve_clip_text(workflow, sampler_inputs.get("negative"))
+        if positive and "prompt" not in info:
+            info["prompt"] = positive
+        if negative and "negative_prompt" not in info:
+            info["negative_prompt"] = negative
 
     # Normalise aliases so callers can rely on one set of keys.
     if "sampler_name" in info and "sampler" not in info:
         info["sampler"] = info["sampler_name"]
     if "denoise" in info and "strength" not in info:
         info["strength"] = info["denoise"]
+
+
+def _resolve_clip_text(
+    workflow: dict[str, Any],
+    ref: Any,
+    depth: int = 0,
+) -> str | None:
+    """Resolve a ComfyUI node reference to the text of a CLIPTextEncode node.
+
+    Handles the common ``[node_id, slot]`` reference directly and follows a few
+    levels through conditioning/sampler merge nodes before giving up.
+    """
+    if depth > 6 or not isinstance(ref, list) or not ref:
+        return None
+    node = workflow.get(str(ref[0]))
+    if not isinstance(node, dict):
+        return None
+    if node.get("class_type") == "CLIPTextEncode":
+        text = node.get("inputs", {}).get("text")
+        return str(text) if text else None
+    inputs = node.get("inputs", {})
+    if isinstance(inputs, dict):
+        for value in inputs.values():
+            if isinstance(value, list) and value:
+                sub = _resolve_clip_text(workflow, value, depth + 1)
+                if sub:
+                    return sub
+    return None

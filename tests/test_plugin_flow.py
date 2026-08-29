@@ -174,7 +174,7 @@ async def test_generate_and_send_success():
     assert isinstance(chain["chain"][1], Plain)
     params_text = chain["chain"][1].text
     assert "耗时" in params_text
-    assert "标签: 1girl, solo" in params_text
+    assert "正向: 1girl, solo" in params_text
     assert "Seed: 42" in params_text
     assert "生成器: comfyui" in params_text
     assert "NSFW:" in params_text
@@ -508,6 +508,14 @@ def test_parse_png_metadata_extracts_comfyui_params():
             "class_type": "UNETLoader",
             "inputs": {"unet_name": "models/miaomiaoHarem_anima8Step10.safetensors"},
         },
+        "5": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": "1girl, solo, best quality"},
+        },
+        "6": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": "lowres, bad anatomy"},
+        },
         "8": {
             "class_type": "KSampler",
             "inputs": {
@@ -517,6 +525,8 @@ def test_parse_png_metadata_extracts_comfyui_params():
                 "sampler_name": "euler",
                 "scheduler": "normal",
                 "denoise": 1.0,
+                "positive": ["5", 0],
+                "negative": ["6", 0],
             },
         },
     }
@@ -530,6 +540,8 @@ def test_parse_png_metadata_extracts_comfyui_params():
     assert info["scheduler"] == "normal"
     assert info["steps"] == 12
     assert info["seed"] == 123
+    assert info["prompt"] == "1girl, solo, best quality"
+    assert info["negative_prompt"] == "lowres, bad anatomy"
 
 
 def test_parse_png_metadata_ignores_webp_preview():
@@ -572,3 +584,48 @@ def test_describe_generation_includes_embedded_model_cfg_strength():
     assert "强度: 1.0" in text
     assert "耗时: 8.9s" in text
     assert "生成器: comfyui" in text
+
+
+def test_describe_generation_includes_positive_and_negative_prompt():
+    job = GenerationJob(
+        id="job-1",
+        status="succeeded",
+        prompt="masterpiece, 1girl, solo",
+        seed=42,
+        width=920,
+        height=1536,
+        steps=12,
+        created_at="2026-01-01T00:00:00Z",
+        artwork_id="art-1",
+        negative_prompt="lowres, bad anatomy",
+    )
+    text = LatentPlugin._describe_generation(job, "masterpiece, 1girl, solo", 8.9)
+
+    assert "正向: masterpiece, 1girl, solo" in text
+    assert "反向: lowres, bad anatomy" in text
+
+
+def test_describe_resolve_includes_positive_and_negative_prompt():
+    hit = ResolverResponse(
+        id="pub-1",
+        image_url="https://latent.moe/media/pub-1",
+        artwork_url="https://latent.moe/art/pub-1",
+        width=832,
+        height=1216,
+        source="comfyui",
+        matched_tags=["1girl"],
+        total_tag_count=6,
+        rank=1,
+        view_count=3,
+        nsfw=False,
+    )
+    text = LatentPlugin._describe_resolve(
+        hit,
+        ["1girl"],
+        {"prompt": "masterpiece, best quality, 1girl", "negative_prompt": "lowres, watermark"},
+        1269 * 1024,
+    )
+
+    assert "正向: masterpiece, best quality, 1girl" in text
+    assert "反向: lowres, watermark" in text
+    assert "文件: 1269 KB" in text

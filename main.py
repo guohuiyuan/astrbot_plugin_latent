@@ -509,9 +509,10 @@ class LatentPlugin(Star):
         if steps_seed:
             lines.append(" | ".join(steps_seed))
 
-        lines.append(f"标签: {prompt}")
-        if job.negative_prompt:
-            lines.append(f"Negative: {job.negative_prompt}")
+        lines.append(f"正向: {prompt}")
+        negative = job.negative_prompt or embedded.get("negative_prompt")
+        if negative:
+            lines.append(f"反向: {negative}")
 
         footer = []
         if meta:
@@ -537,7 +538,7 @@ class LatentPlugin(Star):
         file_size: int | None = None,
     ) -> str:
         embedded = embedded or {}
-        tags_text = ", ".join(tags)
+        tags_text = embedded.get("prompt") or ", ".join(hit.matched_tags or tags)
         lines = ["【搜图结果】"]
         lines.append(f"尺寸: {hit.width} × {hit.height} | 来源: {hit.source}")
 
@@ -574,7 +575,9 @@ class LatentPlugin(Star):
         if steps_seed:
             lines.append(" | ".join(steps_seed))
 
-        lines.append(f"标签: {tags_text}")
+        lines.append(f"正向: {tags_text}")
+        if embedded.get("negative_prompt"):
+            lines.append(f"反向: {embedded['negative_prompt']}")
 
         footer = [
             f"命中: {hit.total_tag_count} 个标签",
