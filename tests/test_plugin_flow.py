@@ -471,6 +471,23 @@ async def test_react_converts_string_message_id_to_int():
     assert event.reacted is None
 
 
+@pytest.mark.asyncio
+async def test_react_reads_message_id_from_message_obj():
+    """Real AstrBot events expose message_id on message_obj, not the event."""
+    fake = FakeClient(succeeded=True)
+    plugin = make_plugin(fake)
+    event = FakeEvent()
+    del event.message_id
+    event.message_obj = SimpleNamespace(message_id="555000")
+
+    await plugin._react_to_message(event)
+
+    assert event.bot.call_action.await_args.args[0] == "set_msg_emoji_like"
+    assert event.bot.call_action.await_args.kwargs["message_id"] == 555000
+    assert event.bot.call_action.await_args.kwargs["self_id"] == "123456"
+    assert event.reacted is None
+
+
 def _make_png_with_prompt(workflow: dict[str, Any]) -> bytes:
     """Build a minimal PNG carrying a ComfyUI ``prompt`` tEXt chunk."""
 

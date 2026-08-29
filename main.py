@@ -97,6 +97,10 @@ class LatentPlugin(Star):
         """在原消息上贴一个表情，作为插件已收到命令的即时反馈。"""
         try:
             message_id = getattr(event, "message_id", None)
+            if message_id is None:
+                message_obj = getattr(event, "message_obj", None)
+                if message_obj is not None:
+                    message_id = getattr(message_obj, "message_id", None)
             bot = getattr(event, "bot", None)
             if message_id is not None and bot is not None and hasattr(bot, "call_action"):
                 # NapCat 的 set_msg_emoji_like 要求 message_id 为 number，
@@ -112,6 +116,11 @@ class LatentPlugin(Star):
                     message_id=message_id,
                     emoji_id="76",
                     self_id=getattr(event, "get_self_id", lambda: None)(),
+                )
+                logger.info(
+                    "[Latent] 表情已贴到原消息: message_id=%s, self_id=%s",
+                    message_id,
+                    getattr(event, "get_self_id", lambda: None)(),
                 )
                 return
         except Exception as exc:
@@ -190,7 +199,7 @@ class LatentPlugin(Star):
         if not tags:
             yield event.plain_result("请提供至少一个 Danbooru 标签，例如：/搜图 1girl, sunset")
             return
-        size = resolve_enum(options.get("size"), VALID_SIZES, "preview")
+        size = resolve_enum(options.get("size"), VALID_SIZES, "original")
         source = resolve_enum(options.get("source"), VALID_SOURCES, None)
         model = str(options.get("model", "") or "").strip() or None
         rank = to_int(options.get("rank"), 1, 1, 1000) if options.get("rank") is not None else None
@@ -210,9 +219,11 @@ class LatentPlugin(Star):
         if hit is None:
             yield event.plain_result("没有找到匹配的公开图片。尝试减少标签或 /生图 直接生成。")
             return
-        media = await self._fetch_media(hit.id, size=size)
+        # The preview WebP strips ComfyUI metadata, so default to the original
+        # PNG to show the same model/CFG/strength/sampler info as generation.
+        media = await self._fetch_media(hit.id, size=None if size == "original" else size)
         embedded = parse_png_metadata(media)
-        caption = self._describe_resolve(hit, tags, embedded)
+        caption = self._describe_resolve(hit, tags, embedded, len(media))
         yield event.chain_result([Image.fromBytes(media), Plain(caption)])
 
     @filter.command("latent", alias={"latent_help", "生图帮助", "画画帮助"})
@@ -523,18 +534,30 @@ class LatentPlugin(Star):
         hit: ResolverResponse,
         tags: list[str],
         embedded: dict[str, Any] | None = None,
+        file_size: int | None = None,
     ) -> str:
         embedded = embedded or {}
         tags_text = ", ".join(tags)
         lines = ["【搜图结果】"]
         lines.append(f"尺寸: {hit.width} × {hit.height} | 来源: {hit.source}")
-        lines.append(f"标签: {tags_text}")
-        lines.append(
-            f"命中: {hit.total_tag_count} 个标签 | 排名: 第 {hit.rank} 名 | 浏览: {hit.view_count}"
-        )
+
         model = embedded.get("model") or hit.model
         if model:
             lines.append(f"模型: {model}")
+
+        direction = "square"
+        if hit.width > hit.height:
+            direction = "landscape"
+        elif hit.height > hit.width:
+            direction = "portrait"
+        sampler_parts = []
+        if embedded.get("sampler"):
+            sampler_parts.append(f"采样器: {embedded['sampler']}")
+        if embedded.get("scheduler"):
+            sampler_parts.append(f"调度器: {embedded['scheduler']}")
+        sampler_parts.append(f"方向: {direction}")
+        lines.append(" | ".join(sampler_parts))
+
         tuning_parts = []
         if embedded.get("cfg") is not None:
             tuning_parts.append(f"CFG比例: {embedded['cfg']}")
@@ -542,6 +565,26 @@ class LatentPlugin(Star):
             tuning_parts.append(f"强度: {embedded['strength']}")
         if tuning_parts:
             lines.append(" | ".join(tuning_parts))
+
+        steps_seed = []
+        if embedded.get("steps"):
+            steps_seed.append(f"步数: {embedded['steps']}")
+        if embedded.get("seed") is not None:
+            steps_seed.append(f"Seed: {embedded['seed']}")
+        if steps_seed:
+            lines.append(" | ".join(steps_seed))
+
+        lines.append(f"标签: {tags_text}")
+
+        footer = [
+            f"命中: {hit.total_tag_count} 个标签",
+            f"排名: 第 {hit.rank} 名",
+            f"浏览: {hit.view_count}",
+        ]
+        if file_size:
+            footer.append(f"文件: {file_size / 1024:.0f} KB")
+        lines.append(" | ".join(footer))
+
         lines.append(f"NSFW: {'是' if hit.nsfw else '否'}")
         lines.append(f"页面: {hit.artwork_url}")
         return "\n".join(lines)
